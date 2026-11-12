@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Truck Hours Lifecycle – Forecast Dashboard</title>
+  <!-- Plotly -->
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <!-- PapaParse for CSV parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+      margin: 20px;
+      background: #f8fafc;
+      color: #1e293b;
+    }
+    .dashboard {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-weight: 400;
+      font-size: 1.6rem;
+      border-bottom: 2px solid #e2e8f0;
+      padding-bottom: 8px;
+      color: #0f172a;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin: 20px 0 16px;
+      align-items: center;
+    }
+    .control-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    label {
+      font-weight: 500;
+      font-size: 0.9rem;
+      color: #334155;
+    }
+    select, input[type="text"] {
+      padding: 8px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      background: white;
+      min-width: 220px;
+      outline: none;
+    }
+    select:focus, input:focus {
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+    }
+    .chart-container {
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      padding: 8px;
+      margin-bottom: 24px;
+      min-height: 520px;
+    }
+    .table-container {
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      padding: 16px;
+      overflow-x: auto;
+    }
+    .table-container h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin: 0 0 12px 0;
+      color: #0f172a;
+    }
+    .pv-wrap {
+      max-height: 500px;
+      overflow: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+    }
+    table {
+      border-collapse: collapse;
+      font-size: 12px;
+      width: 100%;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      background: #f1f5f9;
+      padding: 8px 12px;
+      text-align: right;
+      border-bottom: 2px solid #cbd5e1;
+      white-space: nowrap;
+      font-weight: 600;
+      color: #334155;
+      z-index: 2;
+    }
+    th:nth-child(-n+2), td:nth-child(-n+2) {
+      text-align: left;
+    }
+    td {
+      padding: 6px 12px;
+      text-align: right;
+      border-bottom: 1px solid #f1f5f9;
+      white-space: nowrap;
+    }
+    tr:hover td {
+      background: #fff8dc;
+    }
+    td.exceeded {
+      background-color: #ffcccc !important;
+      color: #990000;
+      font-weight: bold;
+    }
+    .loading-msg {
+      text-align: center;
+      padding: 40px;
+      color: #64748b;
+      font-size: 1rem;
+    }
+    .error-msg {
+      background: #fee2e2;
+      color: #991b1b;
+      padding: 12px 16px;
+      border-radius: 6px;
+      margin: 12px 0;
+    }
+    .note {
+      font-size: 0.8rem;
+      color: #64748b;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+<div class="dashboard">
+  <h1>🚛 Truck Hours Lifecycle – Meter Reading Forecast</h1>
+
+  <div class="controls">
+    <div class="control-group">
+      <label for="siteSelect">Site:</label>
+      <select id="siteSelect"></select>
+    </div>
+    <div class="control-group">
+      <label for="serialInput">Serial:</label>
+      <input type="text" id="serialInput" list="serialList" placeholder="Search or select a serial…" autocomplete="off" />
+      <datalist id="serialList"></datalist>
+    </div>
+  </div>
+
+  <div id="loadingMsg" class="loading-msg">Loading CSV data…</div>
+  <div id="errorMsg" class="error-msg" style="display:none;"></div>
+
+  <div class="chart-container" id="chartContainer" style="display:none;">
+    <div id="plotlyChart" style="width:100%;height:540px;"></div>
+  </div>
+
+  <div class="table-container" id="tableContainer" style="display:none;">
+    <h2>📊 Meter Reading Forecast – Year 0 to Year 10</h2>
+    <div id="tableContent" class="pv-wrap"></div>
+    <p class="note">Cells highlighted red exceed the 15,000-hour limit.</p>
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ============================================================
+  // CONFIGURATION
+  // ============================================================
+  const CSV_URL = "TRUCK HOURS LIFECYCLE_2026-11-06-1415.csv"; // relative to this HTML file
+
+  const MAX_YEAR = 10;
+  const LIMIT_READING = 15000;
+  const MAX_PLAUSIBLE_READING = 100000;
+  const LOOKBACK_DAYS = 730;
+  const MIN_SPAN_DAYS = 30;
+  const DAYS_PER_YEAR = 365.25;
+  const MAX_HOURS_PER_YEAR = 8760;
+  const TOLERANCE_PCT = 0.20;
+
+  // ============================================================
+  // STATE
+  // ============================================================
+  let forecastData = [];       // array of forecast rows
+  let pivotData = [];          // array of pivot rows
+  let allSerials = [];         // sorted serials
+  let allSites = [];           // sorted unique sites
+  let serialSet = new Set();   // fast lookup
+  let historicalBySerial = {}; // serial -> [{date, reading, site}]
+
+  // ============================================================
+  // HELPERS
+  // ============================================================
+  function parseDate(str) {
+    if (!str) return null;
+    // Try ISO YYYY-MM-DD
+    let m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return new Date(Date.UTC(+m[1], +m[2]-1, +m[3]));
+    // Try DD/MM/YYYY or DD-MM-YYYY
+    m = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    if (m) return new Date(Date.UTC(+m[3], +m[2]-1, +m[1]));
+    return null;
+  }
+
+  function dateDiffDays(a, b) {
+    return (a - b) / (1000 * 60 * 60 * 24);
+  }
+
+  function formatDateShort(d) {
+    if (!d) return '';
+    const day = String(d.getUTCDate()).padStart(2,'0');
+    const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()];
+    const yr = d.getUTCFullYear();
+    return `${day} ${mon} ${yr}`;
+  }
+
+  // ============================================================
+  // 1. LOAD AND CLEAN DATA
+  // ============================================================
+  function loadData() {
+    Papa.parse(CSV_URL, {
+      download: true,
+      header: true,
+      skipEmptyLines: true,
+      dynamicTyping: false,
+      complete: function(results) {
+        try {
+          processRawData(results.data);
+        } catch (e) {
+          showError('Error processing data: ' + e.message);
+          console.error(e);
+        }
+      },
+      error: function(err) {
+        showError('Could not load CSV file. Make sure "' + CSV_URL + '" is in the same folder as this HTML file.\n\n' + err.message);
+      }
+    });
+  }
+
+  function showError(msg) {
+    document.getElementById('loadingMsg').style.display = 'none';
+    const errEl = document.getElementById('errorMsg');
+    errEl.style.display = 'block';
+    errEl.textContent = msg;
+  }
+
+  function processRawData(rawRows) {
+    if (!rawRows || rawRows.length === 0) {
+      showError('CSV file is empty or could not be parsed.');
+      return;
+    }
+
+    // Normalise column names
+    const firstRow = rawRows[0];
+    const colMap = {};
+    for (const key of Object.keys(firstRow)) {
+      const k = key.trim();
+      const lower = k.toLowerCase();
+      if (lower === 'site number' || lower === 'site_number' || lower === 'site') colMap.site = key;
+      else if (lower === 'serial number' || lower === 'serial_number' || lower === 'serial') colMap.serial = key;
+      else if (lower === 'last meter reading' || lower === 'last_meter_reading' || lower === 'reading') colMap.reading = key;
+      else if (lower === 'last meter reading date' || lower === 'last_meter_reading_date' || lower === 'date') colMap.date = key;
+    }
+
+    if (!colMap.site || !colMap.serial || !colMap.reading || !colMap.date) {
+      // Fallback: try positional based on known names
+      const keys = Object.keys(firstRow);
+      const findKey = (names) => keys.find(k => names.some(n => k.trim().toLowerCase().includes(n)));
+      colMap.site = colMap.site || findKey(['site']);
+      colMap.serial = colMap.serial || findKey(['serial']);
+      colMap.reading = colMap.reading || findKey(['reading', 'meter']);
+      colMap.date = colMap.date || findKey(['date']);
+    }
+
+    if (!colMap.site || !colMap.serial || !colMap.reading || !colMap.date) {
+      showError('Required columns not found. Expected: Site Number, Serial Number, Last Meter Reading, Last Meter Reading Date.\nFound: ' + Object.keys(firstRow).join(', '));
+      return;
+    }
+
+    // Build cleaned records
+    const records = [];
+    const seen = new Set();
+
+    for (const row of rawRows) {
+      const site = (row[colMap.site] || '').trim();
+      const serial = (row[colMap.serial] || '').trim();
+      const reading = parseFloat(row[colMap.reading]);
+      const date = parseDate((row[colMap.date] || '').trim());
+
+      if (!site || !serial || isNaN(reading) || !date) continue;
+      if (reading <= 0 || reading > MAX_PLAUSIBLE_READING) continue;
+
+      // Deduplicate per serial per day: keep last (highest reading)
+      const key = serial + '|' + date.toISOString().slice(0,10);
+      if (seen.has(key)) {
+        // Replace existing with higher reading
+        const idx = records.findIndex(r => r.serial === serial && r.dateKey === date.toISOString().slice(0,10));
+        if (idx >= 0 && reading > records[idx].reading) {
+          records[idx].reading = reading;
+        }
+        continue;
+      }
+      seen.add(key);
+      records.push({
+        site, serial, reading, date,
+        dateKey: date.toISOString().slice(0,10)
+      });
+    }
+
+    if (records.length === 0) {
+      showError('No valid records after cleaning.');
+      return;
+    }
+
+    // Group by serial
+    const bySerial = {};
+    for (const rec of records) {
+      if (!bySerial[rec.serial]) bySerial[rec.serial] = [];
+      bySerial[rec.serial].push(rec);
+    }
+
+    // Sort each group by date
+    for (const serial of Object.keys(bySerial)) {
+      bySerial[serial].sort((a, b) => a.date - b.date);
+    }
+
+    // Build historical lookup
+    historicalBySerial = {};
+    for (const [serial, recs] of Object.entries(bySerial)) {
+      historicalBySerial[serial] = recs.map(r => ({
+        date: r.date,
+        reading: r.reading,
+        site: r.site
+      }));
+    }
+
+    // ============================================================
+    // 2. FORECAST PER SERIAL
+    // ============================================================
+    const forecastRows = [];
+    const skipped = [];
+
+    for (const [serial, recs] of Object.entries(bySerial)) {
+      const result = forecastSerial(recs);
+      if (result === null) {
+        skipped.push(serial);
+      } else {
+        forecastRows.push({ serial, ...result });
+      }
+    }
+
+    if (forecastRows.length === 0) {
+      showError('No serial numbers have sufficient history to forecast.');
+      return;
+    }
+
+    forecastRows.sort((a, b) => a.serial.localeCompare(b.serial));
+    forecastData = forecastRows;
+
+    // Build sets
+    serialSet = new Set(forecastData.map(r => r.serial));
+    allSerials = forecastData.map(r => r.serial).sort();
+    allSites = [...new Set(forecastData.map(r => r.site))].sort();
+
+    // ============================================================
+    // 3. BUILD PIVOT TABLE
+    // ============================================================
+    buildPivotTable(bySerial);
+
+    // ============================================================
+    // 4. INITIALISE UI
+    // ============================================================
+    initUI();
+  }
+
+  // ============================================================
+  // FORECAST FUNCTION (per serial)
+  // ============================================================
+  function forecastSerial(recs) {
+    if (recs.length < 2) return null;
+
+    // Find the most recent segment with sufficient history
+    // (handle meter resets / decreases)
+    let segment = null;
+    let startIdx = 0;
+
+    for (let i = 1; i < recs.length; i++) {
+      if (recs[i].reading < recs[i-1].reading) {
+        // Break point – check segment before
+        const seg = recs.slice(startIdx, i);
+        if (seg.length >= 2 && dateDiffDays(seg[seg.length-1].date, seg[0].date) >= MIN_SPAN_DAYS) {
+          segment = seg;
+        }
+        startIdx = i;
+      }
+    }
+    // Final segment
+    const finalSeg = recs.slice(startIdx);
+    if (finalSeg.length >= 2 && dateDiffDays(finalSeg[finalSeg.length-1].date, finalSeg[0].date) >= MIN_SPAN_DAYS) {
+      segment = finalSeg;
+    }
+
+    if (!segment) return null;
+
+    const lastDate = segment[segment.length-1].date;
+    const lastReading = segment[segment.length-1].reading;
+    const firstDate = recs[0].date;
+    const site = segment[segment.length-1].site;
+
+    // Use recent history where possible
+    const lookbackMs = LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+    let recent = segment.filter(r => (lastDate - r.date) <= lookbackMs);
+
+    if (recent.length < 2 || dateDiffDays(recent[recent.length-1].date, recent[0].date) < MIN_SPAN_DAYS) {
+      recent = segment;
+    }
+
+    // Build x (days from first recent) and y (readings)
+    const x = [];
+    const y = [];
+    const baseDate = recent[0].date;
+    for (const r of recent) {
+      x.push(dateDiffDays(r.date, baseDate));
+      y.push(r.reading);
+    }
+
+    // Median pairwise slope
+    const slopes = [];
+    for (let i = 0; i < x.length; i++) {
+      for (let j = i + 1; j < x.length; j++) {
+        const days = x[j] - x[i];
+        if (days >= MIN_SPAN_DAYS) {
+          slopes.push((y[j] - y[i]) / days);
+        }
+      }
+    }
+
+    let slope;
+    if (slopes.length > 0) {
+      slopes.sort((a, b) => a - b);
+      const mid = Math.floor(slopes.length / 2);
+      slope = slopes.length % 2 === 0
+        ? (slopes[mid-1] + slopes[mid]) / 2
+        : slopes[mid];
+    } else {
+      // Fallback: simple linear regression
+      const n = x.length;
+      let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+      for (let i = 0; i < n; i++) {
+        sumX += x[i]; sumY += y[i];
+        sumXY += x[i] * y[i]; sumXX += x[i] * x[i];
+      }
+      const denom = n * sumXX - sumX * sumX;
+      slope = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
+    }
+
+    // Physical limits
+    slope = Math.min(Math.max(slope, 0), MAX_HOURS_PER_YEAR / DAYS_PER_YEAR);
+
+    const currentYear = dateDiffDays(lastDate, firstDate) / DAYS_PER_YEAR;
+
+    return {
+      site,
+      hours_per_year: slope * DAYS_PER_YEAR,
+      last_reading: lastReading,
+      last_date: lastDate,
+      first_date: firstDate,
+      current_year: currentYear,
+      points_used: recent.length
+    };
+  }
+
+  // ============================================================
+  // 4. BUILD PIVOT TABLE DATA
+  // ============================================================
+  function buildPivotTable(bySerial) {
+    const pivotRows = [];
+
+    for (const r of forecastData) {
+      const serial = r.serial;
+      const recs = bySerial[serial];
+      const firstDate = r.first_date;
+      const lastReading = r.last_reading;
+      const rate = r.hours_per_year;
+      const currentYear = r.current_year;
+
+      // Latest actual reading per elapsed year
+      const annualReadings = {};
+      for (const rec of recs) {
+        const year = Math.floor(dateDiffDays(rec.date, firstDate) / DAYS_PER_YEAR);
+        annualReadings[year] = rec.reading; // sorted by date, last wins
+      }
+
+      // Find earliest year to exceed 15,000
+      let yearToLimit = Infinity;
+      const exceeded = recs.filter(rec => rec.reading > LIMIT_READING);
+      if (exceeded.length > 0) {
+        // Already exceeded: use first crossing date
+        const firstExceeded = exceeded[0];
+        yearToLimit = dateDiffDays(firstExceeded.date, firstDate) / DAYS_PER_YEAR;
+      } else if (rate > 0 && lastReading <= LIMIT_READING) {
+        yearToLimit = currentYear + (LIMIT_READING - lastReading) / rate;
+      }
+
+      const row = {
+        site: r.site,
+        serial: serial,
+        _sortYear: yearToLimit,
+        years: {}
+      };
+
+      for (let year = 0; year <= MAX_YEAR; year++) {
+        if (year in annualReadings) {
+          row.years[year] = annualReadings[year];
+        } else if (year > currentYear) {
+          row.years[year] = lastReading + rate * (year - currentYear);
+        } else {
+          row.years[year] = null;
+        }
+      }
+
+      pivotRows.push(row);
+    }
+
+    // Sort by earliest year to exceed 15,000
+    pivotRows.sort((a, b) => {
+      if (a._sortYear !== b._sortYear) return a._sortYear - b._sortYear;
+      if (a.site !== b.site) return a.site.localeCompare(b.site);
+      return a.serial.localeCompare(b.serial);
+    });
+
+    pivotData = pivotRows;
+  }
+
+  // ============================================================
+  // 5. RENDER UI
+  // ============================================================
+  function initUI() {
+    document.getElementById('loadingMsg').style.display = 'none';
+    document.getElementById('chartContainer').style.display = 'block';
+    document.getElementById('tableContainer').style.display = 'block';
+    document.getElementById('errorMsg').style.display = 'none';
+
+    // Populate site dropdown
+    const siteSelect = document.getElementById('siteSelect');
+    siteSelect.innerHTML = '';
+    const allOpt = document.createElement('option');
+    allOpt.value = '__ALL__';
+    allOpt.textContent = 'All sites';
+    siteSelect.appendChild(allOpt);
+    for (const site of allSites) {
+      const opt = document.createElement('option');
+      opt.value = site;
+      opt.textContent = site;
+      siteSelect.appendChild(opt);
+    }
+
+    // Populate serial datalist
+    updateSerialDatalist('__ALL__');
+
+    // Event listeners
+    siteSelect.addEventListener('change', function() {
+      updateSerialDatalist(this.value);
+      // Clear serial input when site changes
+      document.getElementById('serialInput').value = '';
+      renderChart(null);
+      renderTable(this.value, null);
+    });
+
+    document.getElementById('serialInput').addEventListener('input', function() {
+      const serial = this.value.trim();
+      const site = siteSelect.value;
+      renderChart(serial);
+      renderTable(site, serial);
+    });
+
+    // Initial render
+    renderChart(null);
+    renderTable('__ALL__', null);
+  }
+
+  function updateSerialDatalist(siteValue) {
+    let serials;
+    if (siteValue === '__ALL__') {
+      serials = allSerials;
+    } else {
+      serials = forecastData.filter(r => r.site === siteValue).map(r => r.serial).sort();
+    }
+
+    const datalist = document.getElementById('serialList');
+    datalist.innerHTML = '';
+    for (const s of serials) {
+      const opt = document.createElement('option');
+      opt.value = s;
+      datalist.appendChild(opt);
+    }
+  }
+
+  // ============================================================
+  // 6. RENDER CHART
+  // ============================================================
+  function renderChart(serial) {
+    const chartDiv = document.getElementById('plotlyChart');
+
+    if (!serial || !serialSet.has(serial)) {
+      // Show empty state
+      Plotly.newPlot(chartDiv, [], {
+        title: { text: 'Select a serial number to see its forecast', font: { size: 16, color: '#64748b' } },
+        xaxis: { visible: false },
+        yaxis: { visible: false },
+        height: 540,
+        margin: { t: 60, b: 40, l: 60, r: 30 },
+        plot_bgcolor: 'white',
+        paper_bgcolor: 'white'
+      }, { responsive: true, displayModeBar: false });
+      return;
+    }
+
+    const r = forecastData.find(f => f.serial === serial);
+    if (!r) return;
+
+    const rate = r.hours_per_year;
+    const lastReading = r.last_reading;
+    const lastDate = r.last_date;
+    const firstDate = r.first_date;
+    const currentYear = r.current_year;
+
+    const history = historicalBySerial[serial] || [];
+    const historyYears = history.map(h => dateDiffDays(h.date, firstDate) / DAYS_PER_YEAR);
+    const historyReadings = history.map(h => h.reading);
+    const historyDates = history.map(h => formatDateShort(h.date));
+
+    // Forecast years: from currentYear to MAX_YEAR
+    const futureYears = [];
+    for (let y = Math.ceil(currentYear); y <= MAX_YEAR; y++) {
+      futureYears.push(y);
+    }
+    const forecastYears = [currentYear, ...futureYears];
+    // Deduplicate and sort
+    const uniqueForecastYears = [...new Set(forecastYears)].sort((a, b) => a - b);
+    const elapsed = uniqueForecastYears.map(y => y - currentYear);
+
+    const forecastValues = elapsed.map(e => lastReading + rate * e);
+    const lower = elapsed.map(e => lastReading + rate * (1 - TOLERANCE_PCT) * e);
+    const upper = elapsed.map(e => lastReading + rate * (1 + TOLERANCE_PCT) * e);
+    const forecastDates = elapsed.map(e => formatDateShort(new Date(lastDate.getTime() + e * DAYS_PER_YEAR * 86400000)));
+
+    // Build traces
+    const traces = [];
+
+    // Historical readings
+    traces.push({
+      x: historyYears,
+      y: historyReadings,
+      mode: 'lines+markers',
+      name: 'Historical readings',
+      line: { width: 2, dash: 'solid', color: '#2563eb' },
+      marker: { size: 5, color: '#2563eb' },
+      customdata: historyDates,
+      hovertemplate: '<b>Historical reading</b><br>' +
+        'Meter reading: <b>%{y:,.0f} hrs</b><br>' +
+        'Year: %{x:.2f}<br>' +
+        'Date: %{customdata}<br>' +
+        '<extra></extra>'
+    });
+
+    // Tolerance band (upper, then lower with fill)
+    traces.push({
+      x: uniqueForecastYears,
+      y: upper,
+      mode: 'lines',
+      line: { width: 0 },
+      hoverinfo: 'skip',
+      showlegend: false
+    });
+    traces.push({
+      x: uniqueForecastYears,
+      y: lower,
+      mode: 'lines',
+      line: { width: 0 },
+      fill: 'tonexty',
+      fillcolor: 'rgba(128,128,128,0.25)',
+      hoverinfo: 'skip',
+      name: `Tolerance (±${Math.round(TOLERANCE_PCT*100)}%)`
+    });
+
+    // Forecast line
+    traces.push({
+      x: uniqueForecastYears,
+      y: forecastValues,
+      mode: 'lines+markers',
+      line: { width: 3, dash: 'dot', color: '#f59e0b' },
+      marker: { size: 9, color: '#f59e0b' },
+      customdata: uniqueForecastYears.map((y, i) => [forecastDates[i], rate, lower[i], upper[i]]),
+      hovertemplate: '<b>Forecast Year %{x:.2f}</b><br>' +
+        'Forecast reading: <b>%{y:,.0f} hrs</b><br>' +
+        'Lower bound: %{customdata[2]:,.0f} hrs<br>' +
+        'Upper bound: %{customdata[3]:,.0f} hrs<br>' +
+        'Approx. date: %{customdata[0]}<br>' +
+        'Usage rate: %{customdata[1]:,.0f} hrs/year' +
+        '<extra></extra>',
+      name: 'Forecast'
+    });
+
+    const xMax = Math.max(MAX_YEAR, currentYear + 0.2);
+
+    const layout = {
+      title: {
+        text: `Meter Reading Forecast – Serial ${serial} (Site ${r.site})<br>` +
+          `<sup>Year 0: ${formatDateShort(firstDate)} | ` +
+          `Current reading: ${lastReading.toLocaleString('en-GB')} hrs on ${formatDateShort(lastDate)} | ` +
+          `Estimated usage: ${Math.round(rate).toLocaleString('en-GB')} hrs/year</sup>`,
+        font: { size: 14 }
+      },
+      xaxis: {
+        title: 'Years from first recorded reading',
+        tickmode: 'linear',
+        tick0: 0,
+        dtick: 1,
+        range: [0, xMax],
+        gridcolor: '#f1f5f9'
+      },
+      yaxis: {
+        title: 'Meter reading (hours)',
+        rangemode: 'tozero',
+        tickformat: ',',
+        gridcolor: '#f1f5f9'
+      },
+      hovermode: 'closest',
+      template: 'plotly_white',
+      height: 540,
+      margin: { t: 90, b: 60, l: 70, r: 30 },
+      legend: { orientation: 'h', y: -0.15 },
+      shapes: [{
+        type: 'line',
+        x0: 0, x1: 1,
+        xref: 'paper',
+        y0: LIMIT_READING, y1: LIMIT_READING,
+        yref: 'y',
+        line: { color: 'red', width: 2, dash: 'dash' }
+      }],
+      annotations: [{
+        x: 0.02, y: LIMIT_READING,
+        xref: 'paper', yref: 'y',
+        text: '15,000 Hour Limit',
+        showarrow: false,
+        font: { color: 'red', size: 11 },
+        bgcolor: 'rgba(255,255,255,0.7)',
+        yshift: 10
+      }]
+    };
+
+    Plotly.newPlot(chartDiv, traces, layout, { responsive: true, displayModeBar: false });
+  }
+
+  // ============================================================
+  // 7. RENDER TABLE
+  // ============================================================
+  function renderTable(siteFilter, serialFilter) {
+    let rows = pivotData;
+
+    if (siteFilter && siteFilter !== '__ALL__') {
+      rows = rows.filter(r => r.site === siteFilter);
+    }
+    if (serialFilter) {
+      rows = rows.filter(r => r.serial === serialFilter);
+    }
+
+    const container = document.getElementById('tableContent');
+    container.innerHTML = '';
+
+    // Header
+    const headerLabels = ['Site', 'Serial Number'];
+    for (let y = 0; y <= MAX_YEAR; y++) {
+      headerLabels.push('Year ' + y);
+    }
+
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const trHead = document.createElement('tr');
+    for (const label of headerLabels) {
+      const th = document.createElement('th');
+      th.textContent = label;
+      trHead.appendChild(th);
+    }
+    thead.appendChild(trHead);
+    table.appendChild(thead);
+
+    // Body
+    const tbody = document.createElement('tbody');
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+
+      // Site
+      const tdSite = document.createElement('td');
+      tdSite.textContent = row.site || '';
+      tr.appendChild(tdSite);
+
+      // Serial
+      const tdSerial = document.createElement('td');
+      tdSerial.textContent = row.serial || '';
+      tr.appendChild(tdSerial);
+
+      // Years 0–10
+      for (let y = 0; y <= MAX_YEAR; y++) {
+        const td = document.createElement('td');
+        const val = row.years[y];
+        if (val !== null && val !== undefined) {
+          td.textContent = Math.round(val).toLocaleString('en-GB');
+          if (val > LIMIT_READING) {
+            td.className = 'exceeded';
+          }
+        }
+        tr.appendChild(td);
+      }
+
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    container.appendChild(table);
+  }
+
+  // ============================================================
+  // START
+  // ============================================================
+  loadData();
+
+})();
+</script>
+</body>
+</html>
